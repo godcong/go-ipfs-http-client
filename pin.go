@@ -15,6 +15,7 @@ import (
 type PinAPI HttpApi
 
 type pinRefKeyObject struct {
+	Cid  string
 	Type string
 }
 
@@ -56,26 +57,41 @@ func (api *PinAPI) Ls(ctx context.Context, opts ...caopts.PinLsOption) (<-chan i
 		return nil, err
 	}
 
-	var out pinRefKeyList
-	err = api.core().Request("pin/ls").
-		Option("type", options.Type).Exec(ctx, &out)
+	req := api.core().Request("pin/ls").Option("type", options.Type)
+	resp, err := req.Option("stream", true).Send(ctx)
 	if err != nil {
 		return nil, err
 	}
-
 	pins := make(chan iface.Pin)
 	go func(ch chan<- iface.Pin) {
+		defer resp.Close()
 		defer close(ch)
-		for hash, p := range out.Keys {
-			c, e := cid.Parse(hash)
-			if e != nil {
-				ch <- &pin{typ: p.Type, err: e}
+		decoder := json.NewDecoder(resp.Output)
+		var out pinRefKeyObject
+		for {
+			err = decoder.Decode(&out)
+			if err != nil {
+				ch <- &pin{err: err}
 				return
 			}
-			ch <- &pin{typ: p.Type, path: path.IpldPath(c), err: e}
+			parsedCid, err := cid.Parse(out.Cid)
+			if err != nil {
+				ch <- &pin{err: err}
+				return
+			}
+			select {
+			case ch <- &pin{
+				path: path.IpldPath(parsedCid),
+				typ:  out.Type,
+				err:  nil,
+			}:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}(pins)
 	return pins, nil
+
 }
 
 // IsPinned returns whether or not the given cid is pinned
